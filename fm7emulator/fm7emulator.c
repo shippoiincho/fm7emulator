@@ -94,6 +94,7 @@ uint32_t key_kana=0;
 uint32_t lastmodifier=0; 
 
 uint32_t fm7cpuclock=1; 
+//uint32_t fm7cpuclock=0; 
 
 // irq/firq flags
 
@@ -181,7 +182,7 @@ uint32_t fm7clocks[]= {
 
 uint32_t tapeclocks[] = {
     250,470,520,105,        // 0,1,tail,head
-    250,470,520,105,
+    418,781,892,165,
 };
 
 
@@ -485,9 +486,11 @@ void tapeout(uint8_t b) {
         tapedata=0;
     }
 
+//  printf("%x-%d-%d-%x\n\r",b,diff,bit,tapedata);
+
     if(b&1) {
 
-//    printf("%x-%d-%d-%x\n\r",b,diff,bit,tapedata);
+//   printf("%x-%d-%d-%x\n\r",b,diff,bit,tapedata);
 
         if(diff<tapeclocks[3+fm7cpuclock*4]+10)  {  // may be start ? bit
 //            bit++;
@@ -1628,6 +1631,12 @@ static mc6809byte__t main_cpu_read(
                 b=fm7keypressed>>8;
 
                 sem_release(&dualport_lock);
+
+                if(fm7cpuclock) {
+                    b|=1;
+                } else {
+                    b&=0xfe;
+                }
 
                 return b;
 
