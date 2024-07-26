@@ -201,7 +201,7 @@ uint32_t fd_ptr;
 lfs_t lfs;
 lfs_file_t lfs_file;
 
-#define FILE_THREHSOLD 2000000
+#define FILE_THREHSOLD 4000000
 #define LFS_LS_FILES 9
 
 volatile uint32_t load_enabled=0;
@@ -435,7 +435,6 @@ void __not_in_flash_func(uart_handler)(void) {
 
     uint8_t ch;
 
-
     if((main_cpu.cycles-uart_cycle)>TAPE_THRESHOLD) {
         uart_count=0;        
     }
@@ -653,85 +652,6 @@ uint8_t tapein(void) {
     return 0;
 
 }
-
-
-#if 0
-uint8_t acia_getc() {
-
-    uint8_t mode,ch;
-
-    mode=ioport[0xd0];
-
-    if(((mode&0x20)==0)&&(load_enabled!=0)) { // Get data from LFS file
-
-        lfs_file_read(&lfs,&lfs_file,&ch,1);
-
-        load_enabled=2; 
-        file_cycle=cpu.cycles;
-
-        return ch;
-
-    } else {    // Get data from UART
-
-        if(uart_read_ptr==uart_write_ptr) {
-            return 0;    // Empty
-        }
-
-        ch=uart_rx[uart_read_ptr];
-
-        uart_read_ptr++;
-        if(uart_read_ptr>31) {
-            uart_read_ptr=0;
-        }
-        return ch;
-    }
-
-}
-
-uint8_t acia_rx_available() {
-
-    uint8_t mode,ch;
-
-
-    mode=ioport[0xd0];
-
-    if(((mode&0x20)==0)&&(load_enabled!=0)) { // Get data from LFS file
-
-        return 1;
-
-    } else {    // Get data from UART
-
-        if(uart_read_ptr==uart_write_ptr) {
-            return 0;    // Empty
-        }
-
-        return 1;
-    }
-}
-
-void acia_write(uint8_t b) {
-
-    uint8_t mode;
-
-    mode=ioport[0xd0];
-
-    if(((mode&0x20)==0)&&(save_enabled!=0)) {
-
-        lfs_file_write(&lfs,&lfs_file,&b,1);
-        save_enabled=2;
-        file_cycle=cpu.cycles;
-
-    } else {
-
-                uart_putc(uart0,tohex(b>>4));
-                uart_putc(uart0,tohex(b&0xf));
-
-    }
-
-}
-#endif
-
-
 
 static inline void video_cls() {
     memset(vga_data_array, 0x0, (640*400/2));
@@ -2455,11 +2375,9 @@ int main() {
     uint32_t filelist=0;
     uint32_t subcpu_wait;
 
- //   uint32_t lastscanline;
-
     set_sys_clock_khz(DOTCLOCK * CLOCKMUL ,true);
 
-   stdio_init_all();
+    stdio_init_all();
 
     uart_init(uart0, 115200);
 
