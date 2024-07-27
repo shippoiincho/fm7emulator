@@ -201,7 +201,7 @@ uint32_t fd_ptr;
 lfs_t lfs;
 lfs_file_t lfs_file;
 
-#define FILE_THREHSOLD 4000000
+#define FILE_THREHSOLD 20000000
 #define LFS_LS_FILES 9
 
 volatile uint32_t load_enabled=0;
