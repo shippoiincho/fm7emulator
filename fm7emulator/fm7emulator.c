@@ -35,9 +35,7 @@
 
 #include "lfs.h"
 
-#include "fm7test.h"
-
-//#define USE_KANJI
+#define USE_KANJI
 
 #ifdef USE_KANJI
 #include "fm7kanji.h"
@@ -73,7 +71,8 @@ mc6809__t      main_cpu,sub_cpu;
 uint8_t mainram[0x10000];
 uint8_t subram[0xd380];
 
-volatile int sub_cpu_halt=0;
+volatile uint32_t sub_cpu_halt=0;
+uint32_t busy_clear_suspended=0;
 semaphore_t dualport_lock;
 
 // Memory Mapped IO
@@ -83,6 +82,7 @@ uint8_t subioport[0x10];
 
 uint16_t vramoffset=0;
 uint16_t oldvramoffset=0;
+
 uint8_t color_palette[0x80];
 
 volatile uint8_t keypressed=0;  //last pressed usbkeycode
@@ -96,6 +96,8 @@ uint32_t lastmodifier=0;
 
 uint32_t fm7cpuclock=1; 
 //uint32_t fm7cpuclock=0; 
+
+uint32_t fm7boot=0;
 
 // irq/firq flags
 
@@ -184,19 +186,25 @@ uint32_t tapeclocks[] = {
 // FDC
 
 uint8_t fdc_command=0;
-uint8_t fdc_status=0x80;
+uint8_t fdc_status=0;
 lfs_file_t fd_drive[2];
 
-unsigned char fd_filename[32];
+unsigned char *fd_filename[2];
+uint32_t fd_status[4];      // 1..disk available 2..disk protected
 uint32_t fd_ptr;
+uint32_t fd_seek_dir=0;
+uint32_t fd_sector_size;
+uint32_t fd_sector_bytes;
+uint8_t fd_track[2]={0,0};
 
 // Define the flash sizes
 // This is setup to read a block of the flash from the end 
 #define BLOCK_SIZE_BYTES (FLASH_SECTOR_SIZE)
-#define HW_FLASH_STORAGE_BYTES  (512 * 1024)
-//#define HW_FLASH_STORAGE_BASE   (PICO_FLASH_SIZE_BYTES - HW_FLASH_STORAGE_BYTES) // 655360
+//#define HW_FLASH_STORAGE_BYTES  (512 * 1024)
+#define HW_FLASH_STORAGE_BYTES  (1536 * 1024)
+#define HW_FLASH_STORAGE_BASE   (PICO_FLASH_SIZE_BYTES - HW_FLASH_STORAGE_BYTES) // 655360
 // for 1M flash pico
-#define HW_FLASH_STORAGE_BASE   (1024*1024 - HW_FLASH_STORAGE_BYTES) // 655360
+//#define HW_FLASH_STORAGE_BASE   (1024*1024 - HW_FLASH_STORAGE_BYTES) // 655360
 
 lfs_t lfs;
 lfs_file_t lfs_file;
@@ -209,11 +217,13 @@ volatile uint32_t save_enabled=0;
 uint32_t file_cycle=0;
 
 unsigned char filename[16];
+unsigned char tape_filename[16];
 
 static void draw_framebuffer(uint16_t);
 static inline unsigned char tohex(int);
 static inline unsigned char fromhex(int);
 static inline void video_print(uint8_t *);
+uint8_t fdc_find_sector(void);
 
 // Virtual H-Sync for emulation
 bool __not_in_flash_func(hsync_handler)(struct repeating_timer *t) {
@@ -540,10 +550,16 @@ uint8_t tapein(void) {
 
 //    printf("%02x %d-%d ",tapedata,nextcycles-main_cpu.cycles,step);
 
+//    printf("[FD00:%02x]",mainioport[0]);
 
-    if((mainioport[0]&1)==0) {
+    if(mainioport[0]&0xc0) {
+        // LPT ON
+        return 0xf6;
+    }
+
+    if((mainioport[0]&2)==0) {
         step=0;
-        return 0x80; // motor off
+        return 0xf6; // motor off
     }
 
     if((main_cpu.cycles>nextcycles)&&(main_cpu.cycles-nextcycles)>TAPE_THRESHOLD) {
@@ -720,14 +736,14 @@ void draw_menu(void) {
     cursor_y=5;
     fbcolor=7;
     video_print("+-------------------------------------+");
-    for(int i=6;i<16;i++) {
+    for(int i=6;i<19;i++) {
         cursor_x=10;
         cursor_y=i;
         video_print("|                                     |");
     }
 
     cursor_x=10;
-    cursor_y=16;
+    cursor_y=19;
     fbcolor=7;
     video_print("+-------------------------------------+");
 
@@ -759,7 +775,7 @@ int draw_files(int num_selected,int page) {
         }
 
         cursor_x=36;
-        cursor_y=15;
+        cursor_y=18;
         fbcolor=7;
         sprintf(str,"Page %02d",page+1);
 
@@ -868,7 +884,7 @@ int enter_filename() {
 
         sprintf(str,"Filename:%s  ",new_filename);
         cursor_x=12;
-        cursor_y=15;
+        cursor_y=18;
         video_print(str);
 
         while(video_vsync_sub==0) ;
@@ -897,7 +913,7 @@ int enter_filename() {
                 keypressed=0;
 
                 cursor_x=12;
-                cursor_y=15;
+                cursor_y=18;
                 video_print("Filename:          ");
 
                 new_filename[pos]=0;
@@ -1119,15 +1135,27 @@ void psg_reset(int flag) {
 
 void fdc_command_write(uint8_t param) {
 
-    uint8_t command,res;
+    uint8_t command,res,driveno;
 
-    printf("FDC:%02x %d-%d-%d-%d\n\r",param,mainioport[0x19],mainioport[0x1a],mainioport[0x1c],mainioport[0x1d]);
+//    printf("FDC:%02x %d-%d-%d-%d\n\r",param,mainioport[0x19],mainioport[0x1a],mainioport[0x1c],mainioport[0x1d]);
 
     fdc_command=param;
 
     command=param>>4;
 
     // drive check ...
+
+    driveno=mainioport[0x1d]&3;
+
+    if(fd_status[driveno]==0) {
+        fdc_status=0x80;
+        return;
+    }
+
+    if(driveno>2) {
+        fdc_status=0x80;
+        return;
+    }
 
     switch(command) {
 
@@ -1136,13 +1164,21 @@ void fdc_command_write(uint8_t param) {
             mainioport[0x19]=0;
             mainioport[0x1b]=0;
 
+            mainioport[0x1f]=0x40;
+            fd_track[driveno]=0;
+
             fdc_status=6;
             return;
 
         case 1:  // seek
-        case 2:  // step
-        case 4:  // step-in
-        case 6:  // step-out
+
+            mainioport[0x1f]=0x40;
+
+            mainioport[0x19]=mainioport[0x1b];
+
+//    printf("[SEEK:%d]",mainioport[0x19]);
+
+            fd_track[driveno]=mainioport[0x19];
 
             if(mainioport[0x19]==0) {
                 fdc_status=6;
@@ -1151,13 +1187,79 @@ void fdc_command_write(uint8_t param) {
             }
             return;
 
+        case 2:  // step
+        case 4:  // step-in
+        case 6:  // step-out
+
+            mainioport[0x1f]=0x40;
+
+            if(mainioport[0x19]==0) {
+                fdc_status=6;
+            } else {
+                fdc_status=0;
+            }
+            fd_track[driveno]=mainioport[0x19];
+            return;
+
         case 3:  // step
+
+            mainioport[0x1f]=0x40;
+
+            if(fd_seek_dir==0) {
+
+                res=mainioport[0x19];
+
+                if(res==80) {
+                    fdc_status=0x10;
+                } else { 
+                    fdc_status=0;
+                }
+                mainioport[0x19]=res+1;
+                fd_track[driveno]=mainioport[0x19];
+                return;
+
+            } else {
+
+               res=mainioport[0x19];
+        
+                if(res==0) {
+                    fdc_status=0x16;
+                } else if(res==1) {
+                    fdc_status=6;
+                }
+
+                mainioport[0x19]=res-1;
+                fd_track[driveno]=mainioport[0x19];
+
+                fdc_status=0;
+                return;
+
+            }
 
             fdc_status=0;
             return;
 
         case 5:  // step-in
 
+            mainioport[0x1f]=0x40;
+
+            fd_seek_dir=0;
+            res=mainioport[0x19];
+
+            if(res==80) {
+                fdc_status=0x10;
+            } else { 
+                fdc_status=0;
+            }
+            mainioport[0x19]=res+1;
+            fd_track[driveno]=mainioport[0x19];
+            return;
+
+        case 7:  // step-out
+
+            mainioport[0x1f]=0x40;
+
+            fd_seek_dir=1;
             res=mainioport[0x19];
         
             if(res==0) {
@@ -1167,52 +1269,56 @@ void fdc_command_write(uint8_t param) {
             }
 
             mainioport[0x19]=res-1;
-
+            fd_track[driveno]=mainioport[0x19];
             fdc_status=0;
             return;
 
-        case 7:  // step-out
-
-            res=mainioport[0x19];
-
-            if(res=80) {
-                fdc_status=0x10;
-            } else { 
-                fdc_status=0;
-            }
-            mainioport[0x19]=res+1;
-            return;
 
         case 8: // Read single sector
 
-            fdc_status=1;
+            mainioport[0x1f]=0x80;
+
+            fdc_find_sector();
+            fdc_status=3;
+
             return;
 
         case 9: // Read Multi sector
 
-            fdc_status=1;
-            return;
+            mainioport[0x1f]=0x80;
 
+            fdc_find_sector();
+            fdc_status=3;
+            return;
 
         case 0xa: // write single sector
 
-            fdc_status=1;
+            mainioport[0x1f]=0x80;
+
+            fdc_find_sector();
+            fdc_status=3;
             return;
 
         case 0xb: // write multi sector
 
-            fdc_status=1;
+            mainioport[0x1f]=0x80;
+
+            fdc_find_sector();
+            fdc_status=3;
             return;
 
         case 0xc: // Read address 
 
             // NOT SUPPORTED
 
+            mainioport[0x1f]=0x40;
+
             fdc_status=0x80;
             return;
 
         case 0xd: // force reset
 
+            mainioport[0x1f]=0x40;
             fdc_status=2;
             return;
         
@@ -1220,6 +1326,7 @@ void fdc_command_write(uint8_t param) {
         case 0xf:  // Write Track
 
             // NOT SUPPORTED
+            mainioport[0x1f]=0x40;
 
             fdc_status=0x80;
             return;
@@ -1229,6 +1336,210 @@ void fdc_command_write(uint8_t param) {
             return;
 
     }
+
+}
+
+// check inserted disk
+
+void fdc_check(uint8_t driveno) {
+
+    uint8_t flags;
+
+    if(lfs_file_seek(&lfs,&fd_drive[driveno],0x1a,LFS_SEEK_SET)) {
+        fd_status[driveno]=0;
+    }
+
+    lfs_file_read(&lfs,&fd_drive[driveno],&flags,1);
+
+    if(flags==0) {
+        fd_status[driveno]=1;
+    } else {
+        fd_status[driveno]=3;        
+    }
+
+//    printf("FD0STATUS:%d-%d",driveno,flags);
+
+}
+
+// check first posision of sector
+
+uint8_t fdc_find_sector(void) {
+
+    uint8_t driveno,track,sector,head,count;
+    uint8_t sector_info[16];
+    uint32_t sector_ptr;
+
+    driveno=mainioport[0x1d]&3;
+//    track=mainioport[0x19];
+    track=fd_track[driveno];
+    sector=mainioport[0x1a];
+    head=mainioport[0x1c];
+
+    lfs_file_seek(&lfs,&fd_drive[driveno],0x20,LFS_SEEK_SET);
+
+    // find track top
+
+    for(int i=0;i<=track*2;i++) {
+        lfs_file_read(&lfs,&fd_drive[driveno],&sector_ptr,4);
+    }
+
+//    printf("[Drive:%d][Track:%d-%04x]",driveno,track,sector_ptr);
+
+    lfs_file_seek(&lfs,&fd_drive[driveno],sector_ptr,LFS_SEEK_SET);
+
+    while(1) {
+        sector_ptr+=0x10;
+        lfs_file_read(&lfs,&fd_drive[driveno],sector_info,16);
+
+ // printf("[%d-%d-%d]",sector_info[0],sector_info[1],sector_info[2],sector_info[3]);
+
+        if((sector_info[2]==sector)&&(sector_info[1]==head)&&(sector_info[0]==track)) {
+            if(sector_info[3]==0) {
+                fd_sector_size=128;
+            } else if(sector_info[3]==1) {
+                fd_sector_size=256;
+            } else if(sector_info[3]==2) {
+                fd_sector_size=512;
+            } else if(sector_info[3]==3) {
+                fd_sector_size=1024;
+            }
+            break;
+        }
+        if(sector_info[3]==0) {
+            lfs_file_seek(&lfs,&fd_drive[driveno],128,LFS_SEEK_CUR);
+            sector_ptr+=128;
+        } else if(sector_info[3]==1) {
+            lfs_file_seek(&lfs,&fd_drive[driveno],256,LFS_SEEK_CUR);
+            sector_ptr+=256;
+        } else if(sector_info[3]==2) {
+            lfs_file_seek(&lfs,&fd_drive[driveno],512,LFS_SEEK_CUR);
+            sector_ptr+=512;
+        } else if(sector_info[3]==3) {
+            lfs_file_seek(&lfs,&fd_drive[driveno],1024,LFS_SEEK_CUR);
+            sector_ptr+=1024;
+        }
+
+        count++;
+        if(count>40) {
+
+//printf("[!NF]");
+
+            return -1;
+
+            break;
+        } // error        
+    }
+
+//    printf("Secrtor:%04x",sector_ptr);
+
+    fd_ptr=sector_ptr;
+    fd_sector_bytes=0;
+
+    return 0;
+
+}
+
+uint8_t fdc_read() {
+
+    uint8_t data,driveno;
+
+    driveno=mainioport[0x1d]&3;
+
+    if(fd_status[driveno]==0) return 0xff;
+    if(fdc_command==0) return 0xff;
+
+    if(fd_sector_bytes==fd_sector_size) {
+        mainioport[0x1f]=0x40;
+        fdc_status=0;
+    }
+
+    lfs_file_read(&lfs,&fd_drive[driveno],&data,1);
+
+    fd_sector_bytes++;
+    mainioport[0x1f]=0x80;
+
+    // find next sector
+
+    if(fd_sector_bytes==fd_sector_size) {
+
+        if(fdc_command&0x10) {
+            mainioport[0x1a]++;
+            fdc_find_sector();
+
+            mainioport[0x1f]=0x80;
+
+        } else {
+
+        mainioport[0x1f]=0x40;
+        fdc_status=0;
+
+        }
+    }
+
+//   printf("%02x",data);
+
+//    printf("%02x[%d/%d]",data,fd_sector_bytes,fd_sector_size);
+
+    return data;
+
+}
+
+void fdc_write(uint8_t data) {
+
+    uint8_t driveno;
+
+    driveno=mainioport[0x1d]&3;
+
+//   printf("%02x",data);
+
+//    printf("%02x[%d/%d]",data,fd_sector_bytes,fd_sector_size);
+
+
+    if(fd_status[driveno]!=1) return;
+    if(fdc_command==0) return;
+
+    if(fd_sector_bytes==fd_sector_size) {
+        mainioport[0x1f]=0x40;
+        fdc_status=0;
+    }
+
+    lfs_file_write(&lfs,&fd_drive[driveno],&data,1);
+
+    fd_sector_bytes++;
+    mainioport[0x1f]=0x80;
+
+    // find next sector
+
+    if(fd_sector_bytes==fd_sector_size) {
+
+        lfs_file_sync(&lfs,&fd_drive[driveno]);
+
+        if(fdc_command&0x10) {
+            mainioport[0x1a]++;
+            fdc_find_sector();
+
+            mainioport[0x1f]=0x80;
+
+        } else {
+
+        mainioport[0x1f]=0x40;
+        fdc_status=0;
+        fdc_command=0;
+
+        mfd_irq=1;
+
+        if(mainioport[2]&0x40) {
+            main_cpu.irq=true;
+        }
+
+        }
+    }
+
+
+
+    return;
+
+
 
 }
 
@@ -1488,6 +1799,9 @@ void process_kbd_report(hid_keyboard_report_t const *report) {
                     if(mainioport[0x2]&1) {
                         main_cpu.irq=true;
                         key_irq=1;
+
+//        printf("[MK:%d,%d]",fm7code,main_cpu.cc.i);
+
                     } else {
                         sub_cpu.firq=true;
                     }
@@ -1606,7 +1920,7 @@ static mc6809byte__t main_cpu_read(
 )
 {
 
-    uint8_t b,f;
+    uint8_t b,f,driveno;
   
     if(addr<0x8000) {
         // RAM area
@@ -1637,7 +1951,17 @@ static mc6809byte__t main_cpu_read(
 
     } else if ((addr>=0xfe00)&&(addr<0xffe0)) { // Boot ROM
 
-        return fm7bootbas[addr-0xfe00];
+
+        if(fm7boot) {
+
+            return fm7bootdos[addr-0xfe00];
+
+        } else {
+
+            return fm7bootbas[addr-0xfe00];
+
+        }
+
 
     } else if (addr>=0xffe0) {  // Interrupt vector
 
@@ -1701,7 +2025,9 @@ static mc6809byte__t main_cpu_read(
                 if(mfd_irq==1) f&=0xef;
 
                 main_timer_irq=0;
-                mfd_irq=0;
+//                mfd_irq=0;
+
+//    printf("[IRQ:%02x]",f);
 
                 return f;
 
@@ -1736,13 +2062,45 @@ static mc6809byte__t main_cpu_read(
 
             case 0x18: // FDC status
 
-//        printf("FDCR:%02x\n\r ",fdc_status);
+                mfd_irq=0;
+
+                driveno=mainioport[0x1d]&3;
+                if(fd_status[driveno]==0) {
+                    return 0x80;
+                }
+
+//        printf("[FDCR:%02x]",fdc_status);
 
                 return fdc_status;
 
-            // case 0x1b:  // FDC data 
+            case 0x1b:  // FDC data 
 
-            //     return 0;
+                if(fdc_status&1) {
+                    return fdc_read();
+                } else {
+                    return mainioport[0x1b];
+                }
+
+            case 0x1f:
+
+                b=mainioport[0x1f];
+//                mainioport[0x1f]&=0x7f;
+
+//            printf("[Q:%02x]",b);
+
+                return b;
+        
+#ifdef USE_KANJI
+
+            case 0x22:
+
+                return fm7kanji[(mainioport[0x20]*256+mainioport[0x21])*2];
+
+            case 0x23:
+
+                return fm7kanji[(mainioport[0x20]*256+mainioport[0x21])*2+1];
+
+#endif
 
             case 7:
             case 0x25:
@@ -1877,9 +2235,15 @@ static mc6809byte__t sub_cpu_read(
 
             case 0xa: // clear BUSY FLAG
 
-                sem_acquire_blocking(&dualport_lock);
-                mainioport[5]&=0x7f;
-                sem_release(&dualport_lock);
+                if(sub_cpu_halt!=0) {
+                    busy_clear_suspended=1;
+                } else {
+
+                    sem_acquire_blocking(&dualport_lock);
+                    mainioport[5]&=0x7f;
+                    sem_release(&dualport_lock);
+
+                }
 
                 return 0xff;
 
@@ -1962,6 +2326,15 @@ static void main_cpu_write(
 
                 return;
 
+// test
+
+            case 2:
+
+//    printf("[FD02:%x]",b);
+
+                mainioport[2]=b;
+                return;
+
             case 3: // beep
 
                 if(b&0x40) beep_short_flag=scanline;
@@ -1989,6 +2362,8 @@ static void main_cpu_write(
                 }
 
                 sem_release(&dualport_lock);
+
+//    printf("[FD05:%02x:%d]",mainioport[5],sub_cpu_halt);
 
                 return;
 
@@ -2103,7 +2478,18 @@ static void main_cpu_write(
 
             case 0x1b: // FDC data
 
-                mainioport[addr-0xfd00]=b;
+                if((mainioport[0x18]&2)&&((fdc_command&0xe0)==0xa0)) {
+                    fdc_write(b);
+                } else {
+                    mainioport[addr-0xfd00]=b;
+                }
+                return;
+
+            case 0x37: // Screen change
+
+                mainioport[0x37]=b;
+                redraw();
+
                 return;
 
             case 0x38:
@@ -2267,6 +2653,8 @@ static void cpu_fault(
 {
   assert(cpu != NULL);
 
+printf("[FAULT:%04x:%d]",cpu->pc.w,fault);
+
   longjmp(cpu->err,fault);
 }
 
@@ -2285,7 +2673,11 @@ void fm7reset(void) {
     mainioport[4]=0xff;
     mainioport[5]=0xff;
 
-    mainioport[15]=0;
+    if(fm7boot==0) {
+        mainioport[15]=0;
+    } else {
+        mainioport[15]=1;
+    }
 
     mainioport[0x37]=0;
     for(int i=0;i<8;i++) {
@@ -2301,9 +2693,13 @@ void fm7reset(void) {
     mfd_irq=0;
     sub_cpu_halt=0;
 
+    fd_track[0]=0;
+    fd_track[1]=0;
+
+
     // TEMPORARY
 
-    fdc_status=0x80;
+//    fdc_status=0x80;
 
 }
 
@@ -2351,6 +2747,10 @@ void main_core1(void) {
 
 
         int rc=mc6809_step(&main_cpu);
+
+           if(sub_cpu_halt==1) {  // wait subcpu halted
+               while(sub_cpu_halt==1);
+           }
 
             if(key_break_flag==1) main_cpu.firq=true;
 
@@ -2423,14 +2823,6 @@ int main() {
     video_mode=0;
     fbcolor=0x7;
 
-    fm7reset();
-
-    psg_reset(0);
-
-    multicore_launch_core1(main_core1);
-
-    multicore_lockout_victim_init();
-
 // uart handler
 
     irq_set_exclusive_handler(UART0_IRQ,uart_handler);
@@ -2448,6 +2840,24 @@ int main() {
        lfs_mount(&lfs,&PICO_FLASH_CFG);
    }
 
+    fm7reset();
+
+    fd_status[0]=0;
+    fd_status[1]=0;
+
+    fd_filename[0]=malloc(16);
+    fd_filename[1]=malloc(16);
+
+    psg_reset(0);
+
+    menumode=1;  // Pause emulator
+
+    multicore_launch_core1(main_core1);
+
+    multicore_lockout_victim_init();
+
+
+
 //  setup emulator (for core 1)
     sub_cpu.read  = sub_cpu_read;
     sub_cpu.write = sub_cpu_write;
@@ -2457,6 +2867,27 @@ int main() {
 
     uint32_t cpuwait=0;
 
+    // FDD TEST
+
+//    fd_filename[0]="\\FBASIC.D77";
+//    fd_filename[0]="\\GAME03.D77";
+
+    //  fd_filename[0]="\\OS-9.D77";
+    //  fm7boot=1;
+    //  mainioport[0xf]=1;
+
+//    lfs_file_open(&lfs,&fd_drive[0],fd_filename[0],LFS_O_RDWR);
+
+//    fdc_check(0);
+
+    // fd_filename[1]="\\GAME01.D77";
+    // lfs_file_open(&lfs,&fd_drive[1],fd_filename[1],LFS_O_RDWR);
+    // fdc_check(1);
+
+    // start emulator
+
+    menumode=0;
+
     subcpu_wait=fm7clocks[fm7cpuclock*2+1];
 
     while(1) {
@@ -2465,12 +2896,24 @@ int main() {
 
         if(sub_cpu_halt==0) {
 
+            if(busy_clear_suspended!=0) {
+                busy_clear_suspended=0;
+                sem_acquire_blocking(&dualport_lock);
+                mainioport[5]&=0x7f;
+                sem_release(&dualport_lock);
+            }
+
             int rc=mc6809_step(&sub_cpu);
 
             if(scroll_flag==1) {
                 scroll(oldvramoffset,vramoffset);
             }
 
+        } else if(sub_cpu_halt==1) {
+                sem_acquire_blocking(&dualport_lock);
+                mainioport[5]|=0x80;
+                sem_release(&dualport_lock);
+            sub_cpu_halt=2;
         }
 
         // unsigned char str[80];
@@ -2547,11 +2990,15 @@ int main() {
             cursor_y=6;
             video_print("MENU");
 
+            if((fdc_command&0xe0)!=0xa0) {
+
             uint32_t used_blocks=lfs_fs_size(&lfs);
             sprintf(str,"Free:%d Blocks",(HW_FLASH_STORAGE_BYTES/BLOCK_SIZE_BYTES)-used_blocks);
             cursor_x=12;
             cursor_y=7;
             video_print(str);
+
+            }
 
             cursor_x=12;            
             cursor_y=9;
@@ -2559,7 +3006,7 @@ int main() {
             if(save_enabled==0) {
                 video_print("SAVE: UART");
             } else {
-                sprintf(str,"SAVE: %8s",filename);
+                sprintf(str,"SAVE: %8s",tape_filename);
                 video_print(str);
             }
             cursor_x=12;
@@ -2569,7 +3016,7 @@ int main() {
             if(load_enabled==0) {
                 video_print("LOAD: UART");
             } else {
-                sprintf(str,"LOAD: %8s",filename);
+                sprintf(str,"LOAD: %8s",tape_filename);
                 video_print(str);
             }
 
@@ -2577,23 +3024,75 @@ int main() {
             cursor_y=11;
 
             if(menuitem==2) { fbcolor=0x70; } else { fbcolor=7; } 
-            video_print("DELETE File");
+            if(fd_status[0]==0) {
+                video_print("FD0: empty");
+            } else {
+                sprintf(str,"FD0: %8s",fd_filename[0]);
+                video_print(str);
+            }
+
             cursor_x=12;
             cursor_y=12;
 
             if(menuitem==3) { fbcolor=0x70; } else { fbcolor=7; } 
-            video_print("Reset");
+            if(fd_status[1]==0) {
+                video_print("FD1: empty");
+            } else {
+                sprintf(str,"FD1: %8s",fd_filename[1]);
+                video_print(str);
+            }
 
             cursor_x=12;
             cursor_y=13;
 
             if(menuitem==4) { fbcolor=0x70; } else { fbcolor=7; } 
-            video_print("Power Cycle");
+            video_print("DELETE File");
 
+            cursor_x=12;
+            cursor_y=14;
+
+            if(menuitem==5) { fbcolor=0x70; } else { fbcolor=7; } 
+            if(fm7cpuclock==0) {
+                video_print("CLOCK: 1.2MHz");
+            } else {
+                video_print("CLOCK:   2MHz");
+            }
+
+            cursor_x=12;
+            cursor_y=15;
+
+            if(menuitem==6) { fbcolor=0x70; } else { fbcolor=7; } 
+            if(fm7boot==0) {
+                video_print("BOOT: BASIC");
+            } else {
+                video_print("BOOT:   DOS");
+            }
+
+            cursor_x=12;
+            cursor_y=16;
+
+            if(menuitem==7) { fbcolor=0x70; } else { fbcolor=7; } 
+            video_print("Reset");
+
+// TEST
+
+        //    cursor_x=12;
+        //     cursor_y=17;
+        //         sprintf(str,"SUB:  %04x %d %02x",sub_cpu.pc.w,sub_cpu.cycles,mainioport[5]);
+        //         video_print(str);
+
+        //    cursor_x=12;
+        //     cursor_y=18;
+        //         sprintf(str,"MAIN: %04x %d",main_cpu.pc.w,main_cpu.cycles);
+        //         video_print(str);
+
+
+        if((fdc_command&0xe0)!=0xa0){
             if(filelist==0) {
                 draw_files(-1,0);
                 filelist=1;
             }
+        }
 
             while(video_vsync_sub==0);
 
@@ -2608,7 +3107,7 @@ int main() {
 
                 if(keypressed==0x51) { // Down
                     keypressed=0;
-                    if(menuitem<4) menuitem++; 
+                    if(menuitem<7) menuitem++; 
                 }
 
                 if(keypressed==0x28) {  // Enter
@@ -2621,7 +3120,8 @@ int main() {
                             uint32_t res=enter_filename();
 
                             if(res==0) {
-                                lfs_file_open(&lfs,&lfs_file,filename,LFS_O_RDWR|LFS_O_CREAT);
+                                memcpy(tape_filename,filename,16);
+                                lfs_file_open(&lfs,&lfs_file,tape_filename,LFS_O_RDWR|LFS_O_CREAT);
                                 save_enabled=1;
                                 file_cycle=main_cpu.cycles;
                             }
@@ -2640,7 +3140,8 @@ int main() {
                             uint32_t res=file_selector();
 
                             if(res==0) {
-                                lfs_file_open(&lfs,&lfs_file,filename,LFS_O_RDONLY);
+                                memcpy(tape_filename,filename,16);
+                                lfs_file_open(&lfs,&lfs_file,tape_filename,LFS_O_RDONLY);
                                 load_enabled=1;
                                 file_cycle=main_cpu.cycles;
                             }
@@ -2651,7 +3152,55 @@ int main() {
                         menuprint=0;
                     }
 
-                    if(menuitem==2) { // Delete
+                    if(menuitem==2) { // FD0
+
+                        if(fd_status[0]==0) {
+
+                            uint32_t res=file_selector();
+
+                            if(res==0) {
+                                memcpy(fd_filename[0],filename,16);
+                                if(fd_status[1]!=0) {
+                                    if(strncmp(fd_filename[0],fd_filename[1],16)==0) {
+                                       continue; 
+                                    }
+                                }
+                                lfs_file_open(&lfs,&fd_drive[0],fd_filename[0],LFS_O_RDONLY);
+                                fdc_check(0);
+                            }
+                        } else {
+                            lfs_file_close(&lfs,&fd_drive[0]);
+                            fd_status[0]=0;
+                        }
+                        menuprint=0;
+
+                    }
+
+                    if(menuitem==3) { // FD1
+
+                        if(fd_status[1]==0) {
+
+                            uint32_t res=file_selector();
+
+                            if(res==0) {
+                                memcpy(fd_filename[1],filename,16);
+                                if(fd_status[0]!=0) {
+                                    if(strncmp(fd_filename[0],fd_filename[1],16)==0) {
+                                       continue; 
+                                    }
+                                }
+                                lfs_file_open(&lfs,&fd_drive[1],fd_filename[1],LFS_O_RDONLY);
+                                fdc_check(1);
+                            }
+                        } else {
+                            lfs_file_close(&lfs,&fd_drive[1]);
+                            fd_status[1]=0;
+                        }
+                        menuprint=0;
+
+                    }
+
+                    if(menuitem==4) { // Delete
 
                         if((load_enabled==0)&&(save_enabled==0)) {
                             uint32_t res=enter_filename();
@@ -2665,25 +3214,36 @@ int main() {
 
                     }
 
+                    if(menuitem==5) { // clock
 
-                    if(menuitem==3) { // reset
-                        menumode=0;
-                        menuprint=0;
-                        redraw();
+                        if(fm7cpuclock==0) {
+                            fm7cpuclock=1;
+                        } else {
+                            fm7cpuclock=0;
+                        }
 
-                        fm7reset();
-
-                        mc6809_reset(&main_cpu);
-                        mc6809_reset(&sub_cpu);
                     }
 
-                    if(menuitem==4) { // power cycle
+
+                    if(menuitem==6) { // boot
+
+                        if(fm7boot==0) {
+                            fm7boot=1;
+                        } else {
+                            fm7boot=0;
+                        }
+
+                    }
+
+                    if(menuitem==7) { // Reset
                         menumode=0;
                         menuprint=0;
                         redraw();
 
-                        memset(mainram,0,0x10000);
-                        memset(subram,0,0xd380);
+                        // memset(mainram,0,0x10000);
+                        // memset(subram,0,0xd380);
+                    
+                        psg_reset(0);
 
                         fm7reset();
 
