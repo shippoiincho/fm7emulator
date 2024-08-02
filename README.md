@@ -119,3 +119,6 @@ FM-7のエミュレータでよく使われている D77ファイルを littlefs
 
 
 # Gallary
+![GAME screenshot](/pictures/screenshot02.jpg)
+![OS9 screenshot](/pictures/screenshot03.jpg)
+![DEMO screenshot](/pictures/screenshot04.jpg)
