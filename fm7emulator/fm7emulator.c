@@ -2779,6 +2779,13 @@ int main() {
     irq_set_enabled(UART0_IRQ,true);
     uart_set_irq_enables(uart0,true,false);
 
+    menumode=1;  // Pause emulator
+
+    multicore_launch_core1(main_core1);
+    multicore_lockout_victim_init();
+
+    sleep_ms(1);
+
 // mount littlefs
    if(lfs_mount(&lfs,&PICO_FLASH_CFG)!=0) {
        cursor_x=0;
@@ -2799,14 +2806,6 @@ int main() {
     fd_filename[1]=malloc(16);
 
     psg_reset(0);
-
-    menumode=1;  // Pause emulator
-
-    multicore_launch_core1(main_core1);
-
-    multicore_lockout_victim_init();
-
-
 
 //  setup emulator (for core 1)
     sub_cpu.read  = sub_cpu_read;
