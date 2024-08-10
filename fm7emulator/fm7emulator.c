@@ -200,11 +200,15 @@ uint8_t fd_track[2]={0,0};
 // Define the flash sizes
 // This is setup to read a block of the flash from the end 
 #define BLOCK_SIZE_BYTES (FLASH_SECTOR_SIZE)
+// for 1M flash pico
 //#define HW_FLASH_STORAGE_BYTES  (512 * 1024)
+//#define HW_FLASH_STORAGE_BASE   (1024*1024 - HW_FLASH_STORAGE_BYTES) // 655360
+// for 2M flash
 #define HW_FLASH_STORAGE_BYTES  (1536 * 1024)
 #define HW_FLASH_STORAGE_BASE   (PICO_FLASH_SIZE_BYTES - HW_FLASH_STORAGE_BYTES) // 655360
-// for 1M flash pico
-//#define HW_FLASH_STORAGE_BASE   (1024*1024 - HW_FLASH_STORAGE_BYTES) // 655360
+// for 16M flash
+//#define HW_FLASH_STORAGE_BYTES  (15872 * 1024)
+//#define HW_FLASH_STORAGE_BASE   (1024*1024*16 - HW_FLASH_STORAGE_BYTES) // 655360
 
 lfs_t lfs;
 lfs_file_t lfs_file;
@@ -259,8 +263,6 @@ bool __not_in_flash_func(sound_handler)(struct repeating_timer *t) {
     uint16_t master_volume;
     uint8_t tone_output[4], noise_output[3],
             envelope_volume;
-
-//    TIM1->CH4CVR = psg_master_volume;
 
     pwm_set_chan_level(pwm_slice_num,PWM_CHAN_A,psg_master_volume);
 
@@ -494,11 +496,7 @@ void tapeout(uint8_t b) {
         tapedata=0;
     }
 
-//  printf("%x-%d-%d-%x\n\r",b,diff,bit,tapedata);
-
     if(b&1) {
-
-//   printf("%x-%d-%d-%x\n\r",b,diff,bit,tapedata);
 
         if(diff<tapeclocks[3+fm7cpuclock*4]+10)  {  // may be start ? bit
 //            bit++;
@@ -547,10 +545,6 @@ uint8_t tapein(void) {
     static uint32_t nextcycles;
     uint32_t diff;
     static uint8_t step,tapedata;
-
-//    printf("%02x %d-%d ",tapedata,nextcycles-main_cpu.cycles,step);
-
-//    printf("[FD00:%02x]",mainioport[0]);
 
     if(mainioport[0]&0xc0) {
         // LPT ON
@@ -1137,8 +1131,6 @@ void fdc_command_write(uint8_t param) {
 
     uint8_t command,res,driveno;
 
-//    printf("FDC:%02x %d-%d-%d-%d\n\r",param,mainioport[0x19],mainioport[0x1a],mainioport[0x1c],mainioport[0x1d]);
-
     fdc_command=param;
 
     command=param>>4;
@@ -1175,8 +1167,6 @@ void fdc_command_write(uint8_t param) {
             mainioport[0x1f]=0x40;
 
             mainioport[0x19]=mainioport[0x1b];
-
-//    printf("[SEEK:%d]",mainioport[0x19]);
 
             fd_track[driveno]=mainioport[0x19];
 
@@ -1357,8 +1347,6 @@ void fdc_check(uint8_t driveno) {
         fd_status[driveno]=3;        
     }
 
-//    printf("FD0STATUS:%d-%d",driveno,flags);
-
 }
 
 // check first posision of sector
@@ -1383,15 +1371,11 @@ uint8_t fdc_find_sector(void) {
         lfs_file_read(&lfs,&fd_drive[driveno],&sector_ptr,4);
     }
 
-//    printf("[Drive:%d][Track:%d-%04x]",driveno,track,sector_ptr);
-
     lfs_file_seek(&lfs,&fd_drive[driveno],sector_ptr,LFS_SEEK_SET);
 
     while(1) {
         sector_ptr+=0x10;
         lfs_file_read(&lfs,&fd_drive[driveno],sector_info,16);
-
- // printf("[%d-%d-%d]",sector_info[0],sector_info[1],sector_info[2],sector_info[3]);
 
         if((sector_info[2]==sector)&&(sector_info[1]==head)&&(sector_info[0]==track)) {
             if(sector_info[3]==0) {
@@ -1422,15 +1406,11 @@ uint8_t fdc_find_sector(void) {
         count++;
         if(count>40) {
 
-//printf("[!NF]");
-
             return -1;
 
             break;
         } // error        
     }
-
-//    printf("Secrtor:%04x",sector_ptr);
 
     fd_ptr=sector_ptr;
     fd_sector_bytes=0;
@@ -1476,10 +1456,6 @@ uint8_t fdc_read() {
         }
     }
 
-//   printf("%02x",data);
-
-//    printf("%02x[%d/%d]",data,fd_sector_bytes,fd_sector_size);
-
     return data;
 
 }
@@ -1489,10 +1465,6 @@ void fdc_write(uint8_t data) {
     uint8_t driveno;
 
     driveno=mainioport[0x1d]&3;
-
-//   printf("%02x",data);
-
-//    printf("%02x[%d/%d]",data,fd_sector_bytes,fd_sector_size);
 
 
     if(fd_status[driveno]!=1) return;
@@ -1855,28 +1827,6 @@ void process_kbd_report(hid_keyboard_report_t const *report) {
                     main_cpu.firq=true;                
                 }
 
-
-            // DEBUG BENCHMARK
-            // if(report->keycode[i]==0x44) {
-            //     uint32_t scanline_old=scanline;
-            //     for(int ii=0;ii<1000;ii++) {
-            //         redraw();
-            //     }
-
-
-            //     printf("%d",scanline-scanline_old);
-                
-            // }   
-
-
-            // TEST
-            // if(report->keycode[i]==0x44) {
-            //     memcpy(mainram+0x2000,fm7test00,0x4a00);  // Exec &h6800
-            // }
-
-            // if(report->keycode[i]==0x45) {
-            //     memcpy(mainram+0x1600,fm7test01,0x5100);  // Exec &h3300
-            // }
 
             // Enter Menu
             if(report->keycode[i]==0x45) {
@@ -2866,23 +2816,6 @@ int main() {
     mc6809_reset(&sub_cpu);
 
     uint32_t cpuwait=0;
-
-    // FDD TEST
-
-//    fd_filename[0]="\\FBASIC.D77";
-//    fd_filename[0]="\\GAME03.D77";
-
-    //  fd_filename[0]="\\OS-9.D77";
-    //  fm7boot=1;
-    //  mainioport[0xf]=1;
-
-//    lfs_file_open(&lfs,&fd_drive[0],fd_filename[0],LFS_O_RDWR);
-
-//    fdc_check(0);
-
-    // fd_filename[1]="\\GAME01.D77";
-    // lfs_file_open(&lfs,&fd_drive[1],fd_filename[1],LFS_O_RDWR);
-    // fdc_check(1);
 
     // start emulator
 
