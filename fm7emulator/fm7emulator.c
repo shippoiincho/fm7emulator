@@ -7,6 +7,9 @@
 //  GP4: Green
 //
 
+//#define PREBUILD_BINARY
+#define USE_KANJI
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,14 +31,18 @@
 
 #include "vga16_graphics.h"
 
+#ifndef PREBUILD_BINARY
 #include "fm7rom.h"
+#else
+#include "fm7rom_prebuild.h"
+#undef USE_KANJI
+#endif
+
 #include "fm7keymap.h"
 #include "mc6809.h"
 #include "fm7misc.h"
 
 #include "lfs.h"
-
-#define USE_KANJI
 
 #ifdef USE_KANJI
 #include "fm7kanji.h"
@@ -2693,8 +2700,8 @@ void main_core1(void) {
         //  sprintf(str,"MAIN :%04x",main_cpu.pc.w);
         //  cursor_x=0;
         //  cursor_y=24;
+        //  fbcolor=7;
         //  video_print(str);
-
 
         int rc=mc6809_step(&main_cpu);
 
@@ -2713,6 +2720,9 @@ void main_core1(void) {
                 video_hsync_main=0;
 
             }
+        }
+        else {
+            printf(" ");  // avoid optimization 
         }
         
     }

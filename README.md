@@ -23,7 +23,7 @@ BML3 エミュレータの派生品です。
 
 Pico を 225MHz で動かしていますが、ほぼ実機の速度が出ていると思います。
 
-# 注意
+# ROM について
 
 いつものように FM-7 実機の ROM が必要です。
 `fm7rom_dummy.h` を `fm7rom.h` にリネームの上以下のデータを入れてください。
@@ -33,6 +33,25 @@ Pico を 225MHz で動かしていますが、ほぼ実機の速度が出てい�
 - サブシステム ROM
 
 漢字ROM が必要な場合は、同様に漢字ROM の内容(128KB) を `fm7kanji.h` の中に入れてください。
+
+# ビルド済みバイナリ
+
+なお、ビルド済みバイナリを`prebuild` 以下に用意しています。
+
+
+uf2 を、Pico に書き込むのと合わせて、ROM ファイルを Pico に置きます。
+
+picotool を使う場合は、以下の通りで行けると思います。
+(picotool は pico-sdk に含まれています)
+
+```
+$ picotool load -v -x fbasic300.rom -t bin -o 0x10070000
+$ picotool load -v -x subsys_c.rom  -t bin -o 0x10078000
+$ picotool load -v -x boot_bas.rom  -t bin -o 0x1007c000
+$ picotool load -v -x boot_dos.rom  -t bin -o 0x1007e000
+```
+
+なお、漢字ROMが必要な方は、ソースからビルドしてください。
 
 # 接続
 
@@ -78,9 +97,15 @@ F12 キーを押すとメニュー画面になります。
 
 ![menu](/pictures/screenshot01.jpg)
 
-# カセット
+# LittleFS について
 
-カセットのセーブ＆ロードは、UART 経由の出力と LittleFS を使ってフラッシュへ保存ができます。
+テープやディスクイメージの保存に LittleFS を使っています。
+既存のファイルの書き込みについては、
+[こちらの記事を参照](https://shippoiincho.github.io/posts/39/)してください。
+
+# テープ
+
+テープのセーブ＆ロードは、UART 経由の出力と LittleFS を使ってフラッシュへ保存ができます。
 通常 UART 経由で入出力されるようになっていますが、
 メニューでファイルを選択すると LittleFS 経由になります。
 
@@ -116,7 +141,8 @@ FM-7のエミュレータでよく使われている D77ファイルを littlefs
 - 6809 の未定義命令を使ったソフトは動作しません。
 - FD の書き込みは非常に遅いうえに、充分な空き容量が必要です。
 - スクロールレジスタの状態が反映されないことがあります。
-
+- PicoSDK 2.0 や Pico2 での動作が不安定です
+- メニュー画面を表示すると UART に空白文字が出力されます
 
 # Gallary
 ![DEMO screenshot](/pictures/screenshot02.jpg)
