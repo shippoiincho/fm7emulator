@@ -7,7 +7,6 @@
 //  GP4: Green
 //
 
-//#define PREBUILD_BINARY
 #define USE_KANJI
 
 #include <stdio.h>
@@ -31,22 +30,19 @@
 
 #include "vga16_graphics.h"
 
-#ifndef PREBUILD_BINARY
-#include "fm7rom.h"
-#else
-#include "fm7rom_prebuild.h"
-#undef USE_KANJI
-#endif
+#define ROMBASE 0x10080000u
+
+uint8_t *fm7mainrom=(uint8_t *)(ROMBASE-0x30000);  // 0x10050000
+uint8_t *fm7subrom =(uint8_t *)(ROMBASE-0x28000);  // 0x10058000
+uint8_t *fm7bootbas=(uint8_t *)(ROMBASE-0x24000);  // 0x1005c000
+uint8_t *fm7bootdos=(uint8_t *)(ROMBASE-0x22000);  // 0x1005e000
+uint8_t *fm7kanji  =(uint8_t *)(ROMBASE-0x20000);  // 0x10060000
 
 #include "fm7keymap.h"
 #include "mc6809.h"
 #include "fm7misc.h"
 
 #include "lfs.h"
-
-#ifdef USE_KANJI
-#include "fm7kanji.h"
-#endif
 
 // VGAout configuration
 
@@ -65,7 +61,7 @@
 extern unsigned char vga_data_array[];
 volatile uint8_t fbcolor,cursor_x,cursor_y,video_mode;
 
-volatile uint32_t video_hsync_sub,video_vsync_sub,scanline;
+volatile uint32_t video_hsync_sub,video_vsync_sub,scanline,scanline_total;
 volatile uint32_t video_hsync_main,video_vsync_main;
 volatile uint32_t redraw_command=0;
 volatile uint32_t scroll_flag=0;
@@ -74,23 +70,28 @@ struct repeating_timer timer,timer2;
 
 // MC6809 configuration
 
-mc6809__t      main_cpu,sub_cpu;
 uint8_t mainram[0x10000];
 uint8_t subram[0xd380];
-
-volatile uint32_t sub_cpu_halt=0;
-uint32_t busy_clear_suspended=0;
-semaphore_t dualport_lock;
-
 // Memory Mapped IO
 
 uint8_t mainioport[0x100];
 uint8_t subioport[0x10];
 
+mc6809__t      main_cpu,sub_cpu;
+
+volatile uint32_t sub_cpu_halt=0;
+uint32_t busy_clear_suspended=0;
+semaphore_t dualport_lock;
+
+
 uint16_t vramoffset=0;
 uint16_t oldvramoffset=0;
 
-uint8_t color_palette[0x80];
+volatile uint8_t color_palette[0x80];
+
+uint32_t renderbuffer[81];  // 80x4
+//uint32_t gvrenderbuffer[81];  
+//uint32_t maskbuffer[81];
 
 volatile uint8_t keypressed=0;  //last pressed usbkeycode
 volatile uint16_t fm7keypressed=0;
@@ -113,6 +114,8 @@ volatile uint32_t attention_flag=0;
 volatile uint32_t main_timer_irq=0;
 volatile uint32_t key_irq=0;
 volatile uint32_t mfd_irq=0;
+
+volatile uint32_t faultflag=0;
 
 // BEEP & PSG
 
@@ -161,7 +164,7 @@ uint32_t uart_cycle;
 
 // UI
 
-uint32_t menumode=0;
+volatile uint32_t menumode=0;
 uint32_t menuitem=0;
 
 // USB
@@ -230,36 +233,70 @@ uint32_t file_cycle=0;
 unsigned char filename[16];
 unsigned char tape_filename[16];
 
-static void draw_framebuffer(uint16_t);
+//static void draw_framebuffer(uint16_t);
 static inline unsigned char tohex(int);
 static inline unsigned char fromhex(int);
 static inline void video_print(uint8_t *);
 uint8_t fdc_find_sector(void);
 
-// Virtual H-Sync for emulation
-bool __not_in_flash_func(hsync_handler)(struct repeating_timer *t) {
+volatile uint32_t video_hsync,video_vsync,scanline,vsync_scanline,video_framecount;
+uint8_t menuram[0x1000];
 
-    if(scanline%262==0) {
+void __not_in_flash_func(draw_framebuffer_menu)(uint32_t line);
+void __not_in_flash_func(draw_framebuffer)(uint32_t line);
+
+#define BASEPOS -2
+
+void __not_in_flash_func(hsync_handler)(void) {
+
+    pio_interrupt_clear(pio0, 0);
+
+    if((scanline!=0)&&(gpio_get(1)==0)) { // VSYNC
+        scanline=0;
+        video_vsync=1;
         video_vsync_main=1;
         video_vsync_sub=1;
+        video_framecount++;
+    } else {
+        scanline++;
     }
 
-    scanline++;
+    if((scanline%2)==0) {
+        video_hsync=1;
+        scanline_total++;
+
+        if((scanline>=(73+BASEPOS))&&(scanline<=(472+BASEPOS))) {        
+//        if((scanline>=73)&&(scanline<=472)) {
+//        if((scanline>=81)&&(scanline<=464)) {
+            if(menumode) {
+                draw_framebuffer_menu((scanline-(73+BASEPOS))/2);
+                memcpy(vga_data_array +320*(((scanline-(73+BASEPOS))/2)%4),renderbuffer,320);    
+            } else {
+                draw_framebuffer((scanline-(73+BASEPOS))/2);
+                memcpy(vga_data_array +320*(((scanline-(73+BASEPOS))/2)%4),renderbuffer,320);                   
+            }
+        }
 
     video_hsync_main=1;
     video_hsync_sub=1;
 
-    if((scanline%32==0)&&(mainioport[2]&4)) {
+    } 
+
+    if((scanline_total%64==0)&&(mainioport[2]&4)) {    
+//    if((scanline_total%32==0)&&(mainioport[2]&4)) {
         main_timer_irq=1;
         main_cpu.irq=true;
     }
 
-    if(scanline%315==0) {   // 315 = 20ms / 63.5us
+    if(scanline_total%630==0) {   // 315 = 20ms / 63.5us
+//    if(scanline_total%315==0) {   // 315 = 20ms / 63.5us
         sub_cpu.nmi=true;
 //        sub_cpu_nmi_count=scanline;
     }
 
-    return true;
+
+
+    return;
 
 }
 
@@ -492,9 +529,9 @@ void tapeout(uint8_t b) {
     uint32_t diff;
     static uint8_t bit,tapedata;
 
+    mainioport[0]=b;
+
     if((b&2)==0) return; // motor off
-
-
 
     diff=main_cpu.cycles-lastcycles;
 
@@ -553,7 +590,7 @@ uint8_t tapein(void) {
     uint32_t diff;
     static uint8_t step,tapedata;
 
-    if(mainioport[0]&0xc0) {
+    if(mainioport[0]&0x80) {
         // LPT ON
         return 0xf6;
     }
@@ -671,13 +708,13 @@ uint8_t tapein(void) {
 }
 
 static inline void video_cls() {
-    memset(vga_data_array, 0x0, (640*400/2));
+        memset(menuram,0,0x800);
 }
 
 static inline void video_scroll() {
 
-    memmove(vga_data_array, vga_data_array + VGA_PIXELS_X/2*16, (640*384/2));
-    memset(vga_data_array + (640*384/2), 0, VGA_PIXELS_X/2*16);
+//    memmove(vga_data_array, vga_data_array + VGA_PIXELS_X*10, (VGA_PIXELS_X*(VGA_PIXELS_X-10)));
+//    memset(vga_data_array + (VGA_CHARS_X*(VGA_PIXELS_X-10)), 0, VGA_PIXELS_X*10);
 
 }
 
@@ -685,38 +722,15 @@ static inline void video_print(uint8_t *string) {
 
     int len;
     uint8_t fdata;
+    uint32_t vramindex;
 
     len = strlen(string);
 
     for (int i = 0; i < len; i++) {
 
-        for(int slice=0;slice<16;slice++) {
-
-            uint8_t ch=string[i];
-
-            fdata=fm7subrom[(ch*8+(slice>>1))];
-  
-            uint32_t vramindex=cursor_x*4+VGA_PIXELS_X*(cursor_y*16+slice)/2;
-
-            for(int slice_x=0;slice_x<4;slice_x++){
-
-                if(fdata&0x40) {
-                    vga_data_array[vramindex+slice_x]=(fbcolor&7)<<4;
-                } else {
-                    vga_data_array[vramindex+slice_x]=fbcolor&0x70;  
-                }
-
-                  if(fdata&0x80) {
-                    vga_data_array[vramindex+slice_x]+=fbcolor&7;
-                } else {
-                    vga_data_array[vramindex+slice_x]+=(fbcolor&0x70)>>4;  
-                }              
-
-                fdata<<=2;
-
-            }
-
-        }
+        uint8_t ch=string[i];
+        menuram[cursor_x+cursor_y*VGA_CHARS_X]=ch;
+        menuram[cursor_x+cursor_y*VGA_CHARS_X+0x800]=fbcolor;
 
         cursor_x++;
         if (cursor_x >= VGA_CHARS_X) {
@@ -946,11 +960,42 @@ int enter_filename() {
 
 }
 
+// MENU mode
+// output to render buffer
+void __not_in_flash_func(draw_framebuffer_menu)(uint32_t line) {
 
-static void draw_framebuffer(uint16_t addr){
+    uint32_t scany,scanyy;
+    uint32_t fontw1,fontw2;
+    uint16_t attribute,vramaddr,ch;
+    uint8_t screenwidth,scanx,bgcolor,fontdata,fgcolor;
+
+    scany=line/8;
+    scanyy=line%8;
+
+    vramaddr=scany*VGA_CHARS_X;
+
+    // check cursor position
+
+    for(int i=0;i<VGA_CHARS_X;i++) {
+
+        attribute=menuram[vramaddr+0x800];
+        ch=menuram[vramaddr++];
+
+        bgcolor=(attribute&0xf0)>>4;
+        fgcolor=attribute&0xf;
+
+        fontdata=fm7subrom[ch*8+scanyy];
+            
+        fontw1=bitexpand80[fontdata*2]*fgcolor+bitexpand80[fontdata*2+1]*bgcolor;
+        renderbuffer[i]=fontw1;
+
+    }
+}
+
+void __not_in_flash_func(draw_framebuffer)(uint32_t line) {
 
     uint32_t slice_x,slice_y;
-    uint16_t offset;
+    uint16_t offset,addr;
     uint32_t vramindex;
     uint8_t bitb,bitr,bitg,color;
     uint32_t bitwb,bitwr,bitwg;
@@ -963,22 +1008,23 @@ static void draw_framebuffer(uint16_t addr){
     union bytemember bitw,bitc;
 
     if(subioport[0x8]!=0) {
+        // CRT OFF
+        memset(renderbuffer,0,320);
         return;
     }
 
-    uint32_t *vramptr=(uint32_t *)vga_data_array;
-
+    addr=line*80;
     addr&=0x3fff;
 
-    offset=vramoffset+addr;
-    offset&=0x3fff;
-
-    slice_x=addr%80;
-    slice_y=addr/80;
+//    offset=vramoffset+addr;
+//    offset&=0x3fff;
 
     uint8_t mask=mainioport[0x37];
 
-    if(slice_y<200) {
+    for(slice_x=0;slice_x<80;slice_x++) {
+
+        offset=vramoffset+addr+slice_x;
+        offset&=0x3fff;
 
         if(mask&0x10) {
             bitb=0;
@@ -996,8 +1042,6 @@ static void draw_framebuffer(uint16_t addr){
             bitg=subram[offset+0x8000];
         }
 
-        vramindex=slice_x + slice_y*640/4;
-
         bitwb=bitexpand80[bitb*2];
         bitwr=bitexpand80[bitr*2]<<1;
         bitwg=bitexpand80[bitg*2]<<2;
@@ -1009,81 +1053,7 @@ static void draw_framebuffer(uint16_t addr){
         bitc.b[2]=color_palette[bitw.b[2]];
         bitc.b[3]=color_palette[bitw.b[3]];
 
-        *(vramptr+vramindex) = bitc.w;
-        *(vramptr+vramindex+VGA_PIXELS_X/8) = bitc.w;
-
-    }
-
-}
-
-static inline void redraw(){
-
-    for(int i=0;i<0x3e80;i++) {
-        draw_framebuffer(i);
-    }
-
-}
-
-static inline void scroll(uint16_t old_offset,uint16_t new_offset) {
-
-    uint32_t delta,size;
-    uint32_t movesize;
-    uint32_t deltax,deltay;
-
-    oldvramoffset=vramoffset;
-    scroll_flag=0;
-
-    if (old_offset-new_offset>80*100) {
-        new_offset+=0x4000;
-    } else if(new_offset-old_offset>80*100) {
-        old_offset+=0x4000;
-    }
-          
-    if(old_offset>new_offset) {  // down scroll
-
-        delta=old_offset-new_offset;
-
-        size=80*200-delta;
-    
-        if((delta%80)!=0) {    
-            redraw();
-            return;
-
-        } else {
-            delta*=8;
-        }
-
-        // move up half
-        movesize=640*400/2-delta;
-        memmove(vga_data_array+delta,vga_data_array,movesize);
-
-        // redraw new area
-        for(int i=0;i<size;i++) {
-            draw_framebuffer(i);
-        }
-
-    } else {  // up scroll
-
-        delta=new_offset-old_offset;
-        size=80*200-delta;
-
-        if((delta%80)!=0) {
-
-            redraw();
-            return;
-
-        } else {
-            delta*=8;
-        }
-
-        // move up half
-        movesize=640*400/2-delta;
-        memmove(vga_data_array,vga_data_array+delta,movesize);
-
-        // redraw new area
-        for(int i=size;i<0x3e80;i++) {
-            draw_framebuffer(i);
-        }
+        renderbuffer[slice_x] = bitc.w;
 
     }
 
@@ -2128,7 +2098,7 @@ static mc6809byte__t sub_cpu_read(
 
         sem_acquire_blocking(&dualport_lock);
 
-        b=mainram[addr-0xd380+0xfc80];
+        b=mainram[(addr-0xd380)+0xfc80];
 
         sem_release(&dualport_lock);
 
@@ -2186,8 +2156,6 @@ static mc6809byte__t sub_cpu_read(
 
                 subioport[0x8]=0;
 
-                redraw();
-
                 return 0xff;
 
             case 0xa: // clear BUSY FLAG
@@ -2239,7 +2207,6 @@ static void main_cpu_write(
         // cursor_y=24;
         // video_print(str);
 
-
     if(addr<0x8000) {
 
         mainram[addr]=b;
@@ -2282,8 +2249,6 @@ static void main_cpu_write(
                 tapeout(b);
 
                 return;
-
-// test
 
             case 2:
 
@@ -2445,7 +2410,6 @@ static void main_cpu_write(
             case 0x37: // Screen change
 
                 mainioport[0x37]=b;
-                redraw();
 
                 return;
 
@@ -2462,7 +2426,6 @@ static void main_cpu_write(
 
                 mainioport[addr-0xfd00]=b&7;
                 rebuild_colorpalette();
-                redraw();
                 return;
 
             default:
@@ -2487,32 +2450,31 @@ static void sub_cpu_write(
 
          unsigned char str[80];
 
-    if((addr<0x4000)&&((mainioport[0x37]&1)==0)) {
+    if(addr<0x4000) {
 
-        offset=(addr+vramoffset)&0x3fff;
-
-        subram[offset]=b;
-        draw_framebuffer(addr);
-
-        return;
-
-    } else if((addr<0x8000)&&((mainioport[0x37]&2)==0)) {
-
-        offset=(addr+vramoffset)&0x3fff;
-
-        subram[offset+0x4000]=b;
-
-        draw_framebuffer(addr);
+        if((mainioport[0x37]&1)==0) {
+            offset=(addr+vramoffset)&0x3fff;
+            subram[offset]=b;
+        }        
 
         return;
 
-    } else if((addr<0xc000)&&((mainioport[0x37]&4)==0)) {
+    } else if(addr<0x8000) {
 
-        offset=(addr+vramoffset)&0x3fff;
+        if((mainioport[0x37]&2)==0) {        
+            offset=(addr+vramoffset)&0x3fff;
+            subram[offset+0x4000]=b;
+        }
 
-        subram[offset+0x8000]=b;
+        return;
 
-        draw_framebuffer(addr);
+    } else if(addr<0xc000) {
+
+        if((mainioport[0x37]&4)==0) {          
+            offset=(addr+vramoffset)&0x3fff;
+            subram[offset+0x8000]=b;
+        }
+
         return;
 
     } else if(addr<0xd380) {
@@ -2524,7 +2486,7 @@ static void sub_cpu_write(
 
         sem_acquire_blocking(&dualport_lock);
 
-        mainram[addr-0xd380+0xfc80]=b;
+        mainram[(addr-0xd380)+0xfc80]=b;
         
         sem_release(&dualport_lock);
 
@@ -2554,11 +2516,6 @@ static void sub_cpu_write(
             case 0x8: // display OFF
 
                 subioport[0x8]=1;
-
-                // clear display
-
-                memset(vga_data_array,0,640*400/2);
-
                 return;
 
             case 0xa:   // set Busy flag
@@ -2585,7 +2542,7 @@ static void sub_cpu_write(
 
                 vramoffset=((subioport[14]*256)+subioport[15])&0x3fe0;
 
-                scroll_flag=1;
+//                scroll_flag=1;
 
                 return;
 
@@ -2596,7 +2553,6 @@ static void sub_cpu_write(
         }
 
     }
-
     
 }
 
@@ -2611,8 +2567,8 @@ static void cpu_fault(
   assert(cpu != NULL);
 
 printf("[FAULT:%04x:%d]",cpu->pc.w,fault);
-
-  longjmp(cpu->err,fault);
+    faultflag=1;
+    longjmp(cpu->err,fault);
 }
 
 void fm7reset(void) {
@@ -2653,6 +2609,7 @@ void fm7reset(void) {
     fd_track[0]=0;
     fd_track[1]=0;
 
+    vramoffset=0;
 
     // TEMPORARY
 
@@ -2686,9 +2643,9 @@ void main_core1(void) {
 
     scanline=0;
 
-    // set virtual Hsync timer
-
-    add_repeating_timer_us(63,hsync_handler,NULL  ,&timer);
+    irq_set_exclusive_handler (PIO0_IRQ_0, hsync_handler);
+    irq_set_enabled(PIO0_IRQ_0, true);
+    pio_set_irq0_source_enabled (pio0, pis_interrupt0 , true);
 
     maincpu_wait=fm7clocks[fm7cpuclock*2];
 
@@ -2704,7 +2661,8 @@ void main_core1(void) {
         //  video_print(str);
 
         int rc=mc6809_step(&main_cpu);
-
+//            main_cpu.cycles++;
+        
            if(sub_cpu_halt==1) {  // wait subcpu halted
                while(sub_cpu_halt==1);
            }
@@ -2714,15 +2672,18 @@ void main_core1(void) {
             if((main_cpu.cycles-main_hsync_cycle)>maincpu_wait) {
 
                 main_hsync_cycle=main_cpu.cycles;
-
+                                
                 while(video_hsync_main==0) ;
 
                 video_hsync_main=0;
 
             }
-        }
-        else {
-            printf(" ");  // avoid optimization 
+
+        } else {
+            while(video_hsync_main==0) ;
+            video_hsync_main=0;
+//            printf(" ");  // avoid optimization 
+
         }
         
     }
@@ -2789,6 +2750,11 @@ int main() {
     irq_set_enabled(UART0_IRQ,true);
     uart_set_irq_enables(uart0,true,false);
 
+//    scanline=0;
+//    irq_set_exclusive_handler (PIO0_IRQ_0, hsync_handler);
+//    irq_set_enabled(PIO0_IRQ_0, true);
+//    pio_set_irq0_source_enabled (pio0, pis_interrupt0 , true);
+
     menumode=1;  // Pause emulator
 
     multicore_launch_core1(main_core1);
@@ -2847,9 +2813,9 @@ int main() {
 
             int rc=mc6809_step(&sub_cpu);
 
-            if(scroll_flag==1) {
-                scroll(oldvramoffset,vramoffset);
-            }
+            // if(scroll_flag==1) {
+            //     scroll(oldvramoffset,vramoffset);
+            // }
 
         } else if(sub_cpu_halt==1) {
                 sem_acquire_blocking(&dualport_lock);
@@ -3016,18 +2982,16 @@ int main() {
             if(menuitem==7) { fbcolor=0x70; } else { fbcolor=7; } 
             video_print("Reset");
 
-// TEST
 
-        //    cursor_x=12;
-        //     cursor_y=17;
-        //         sprintf(str,"SUB:  %04x %d %02x",sub_cpu.pc.w,sub_cpu.cycles,mainioport[5]);
-        //         video_print(str);
+            // cursor_x=12;
+            // cursor_y=17;
+            // sprintf(str,"SUB:  %04x %d %02x %d",sub_cpu.pc.w,sub_cpu.cycles,mainioport[5],faultflag);
+            // video_print(str);
 
-        //    cursor_x=12;
-        //     cursor_y=18;
-        //         sprintf(str,"MAIN: %04x %d",main_cpu.pc.w,main_cpu.cycles);
-        //         video_print(str);
-
+            // cursor_x=12;
+            // cursor_y=18;
+            // sprintf(str,"MAIN: %04x %d %d",main_cpu.pc.w,main_cpu.cycles,main_hsync_cycle);
+            // video_print(str);
 
         if((fdc_command&0xe0)!=0xa0){
             if(filelist==0) {
@@ -3107,7 +3071,7 @@ int main() {
                                        continue; 
                                     }
                                 }
-                                lfs_file_open(&lfs,&fd_drive[0],fd_filename[0],LFS_O_RDONLY);
+                                lfs_file_open(&lfs,&fd_drive[0],fd_filename[0],LFS_O_RDWR);
                                 fdc_check(0);
                             }
                         } else {
@@ -3131,7 +3095,7 @@ int main() {
                                        continue; 
                                     }
                                 }
-                                lfs_file_open(&lfs,&fd_drive[1],fd_filename[1],LFS_O_RDONLY);
+                                lfs_file_open(&lfs,&fd_drive[1],fd_filename[1],LFS_O_RDWR);
                                 fdc_check(1);
                             }
                         } else {
@@ -3180,7 +3144,6 @@ int main() {
                     if(menuitem==7) { // Reset
                         menumode=0;
                         menuprint=0;
-                        redraw();
 
                         // memset(mainram,0,0x10000);
                         // memset(subram,0,0xd380);
@@ -3199,7 +3162,6 @@ int main() {
                     keypressed=0;
                     menumode=0;
                     menuprint=0;
-                    redraw();
                 //  break;     // escape from menu
                 }
             

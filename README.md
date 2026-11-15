@@ -26,32 +26,24 @@ Pico を 225MHz で動かしていますが、ほぼ実機の速度が出てい�
 # ROM について
 
 いつものように FM-7 実機の ROM が必要です。
-`fm7rom_dummy.h` を `fm7rom.h` にリネームの上以下のデータを入れてください。
 
 - F-BASIC
 - Boot ROM (BASIC/DOS)
 - サブシステム ROM
+- 漢字ROM (必要に応じて)
 
-漢字ROM が必要な場合は、同様に漢字ROM の内容(128KB) を `fm7kanji.h` の中に入れてください。
-
-# ビルド済みバイナリ
-
-なお、ビルド済みバイナリを`prebuild` 以下に用意しています。
-
-
-uf2 を、Pico に書き込むのと合わせて、ROM ファイルを Pico に置きます。
+`fm7emulator.uf2` を、Pico に書き込むのと合わせて、ROM ファイルを Pico に置きます。
 
 picotool を使う場合は、以下の通りで行けると思います。
 (picotool は pico-sdk に含まれています)
 
 ```
-$ picotool load -v -x fbasic300.rom -t bin -o 0x10070000
-$ picotool load -v -x subsys_c.rom  -t bin -o 0x10078000
-$ picotool load -v -x boot_bas.rom  -t bin -o 0x1007c000
-$ picotool load -v -x boot_dos.rom  -t bin -o 0x1007e000
+$ picotool load -v -x fbasic300.rom -t bin -o 0x10050000
+$ picotool load -v -x subsys_c.rom  -t bin -o 0x10058000
+$ picotool load -v -x boot_bas.rom  -t bin -o 0x1005c000
+$ picotool load -v -x boot_dos.rom  -t bin -o 0x1005e000
+$ picotool load -v -x kanji.rom  -t bin -o 0x10060000
 ```
-
-なお、漢字ROMが必要な方は、ソースからビルドしてください。
 
 # 接続
 
@@ -75,6 +67,11 @@ PIO を使った VGA 画面出力を行っています。
 
 カラーパレットの操作やスクロール時に、実機では不要な全画面の書き換えが必要になる場合があります。
 そのようなソフトでは動作が遅くなります。(Disk BASIC の DEMO など)
+
+(NEW:2026-11-15)
+
+フレームバッファ方式をやめてリアルタイム描画に変更しました。
+カラーパレットやスクロールはほぼ実機の速度になっていると思います。
 
 # キーボード
 
@@ -141,8 +138,6 @@ FM-7のエミュレータでよく使われている D77ファイルを littlefs
 - 6809 の未定義命令を使ったソフトは動作しません。
 - FD の書き込みは非常に遅いうえに、充分な空き容量が必要です。
 - スクロールレジスタの状態が反映されないことがあります。
-- PicoSDK 2.0 や Pico2 での動作が不安定です
-- メニュー画面を表示すると UART に空白文字が出力されます
 
 # Gallary
 ![DEMO screenshot](/pictures/screenshot02.jpg)

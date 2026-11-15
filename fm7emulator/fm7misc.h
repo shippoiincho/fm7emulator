@@ -1,7 +1,7 @@
 
 // Lookup table for drawing framebuffer
 
-const uint32_t bitexpand80[] = {
+uint32_t bitexpand80[] = {
 0x00000000,0x11111111,
 0x10000000,0x01111111,
 0x01000000,0x10111111,

@@ -61,6 +61,7 @@ static inline void hsync_program_init(PIO pio, uint sm, uint offset, uint pin) {
 //    sm_config_set_clkdiv(&c, 5) ;
 //    sm_config_set_clkdiv(&c, 16) ;
         sm_config_set_clkdiv(&c, 18) ;
+//        sm_config_set_clkdiv(&c, 20) ;
 //    sm_config_set_clkdiv(&c, 8) ;
 
     // Set this pin's GPIO function (connect PIO to the pad)
