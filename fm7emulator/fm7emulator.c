@@ -279,22 +279,18 @@ void __not_in_flash_func(hsync_handler)(void) {
 
     video_hsync_main=1;
     video_hsync_sub=1;
-
-    } 
-
-//    if(((scanline_total%64)==0)&&(mainioport[2]&4)) {    
+ 
     if(((scanline_total%32)==0)&&(mainioport[2]&4)) {
         main_timer_irq=1;
         main_cpu.irq=true;
     }
 
-//    if(scanline_total%630==0) {   // 315 = 20ms / 63.5us
     if((scanline_total%315)==0) {   // 315 = 20ms / 63.5us
         sub_cpu.nmi=true;
 //        sub_cpu_nmi_count=scanline;
     }
 
-
+    } 
 
     return;
 
