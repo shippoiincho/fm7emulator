@@ -146,7 +146,8 @@ const uint16_t psg_volume[] = { 0x00, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x09, 0x0b, 0x0d, 0x10, 0x13, 0x17, 0x1b, 0x20,
         0x26, 0x2d, 0x36, 0x40, 0x4c, 0x5a, 0x6b, 0x80, 0x98, 0xb4, 0xd6, 0xff };
 
-#define SAMPLING_FREQ 24000
+//#define SAMPLING_FREQ 24000
+#define SAMPLING_FREQ 15750
 //#define SAMPLING_FREQ 22050
 #define TIME_UNIT 100000000                           // Oscillator calculation resolution = 10nsec
 #define SAMPLING_INTERVAL (TIME_UNIT/SAMPLING_FREQ) 
@@ -244,6 +245,8 @@ uint8_t menuram[0x1000];
 
 void __not_in_flash_func(draw_framebuffer_menu)(uint32_t line);
 void __not_in_flash_func(draw_framebuffer)(uint32_t line);
+bool __not_in_flash_func(sound_handler)(struct repeating_timer *t);
+
 
 #define BASEPOS -2
 
@@ -290,7 +293,9 @@ void __not_in_flash_func(hsync_handler)(void) {
 //        sub_cpu_nmi_count=scanline;
     }
 
-    } 
+    } else {
+        sound_handler(&timer2);
+    }
 
     return;
 
@@ -2641,11 +2646,15 @@ void main_core1(void) {
 
     mc6809_reset(&main_cpu);
 
-    scanline=0;
+    // set PSG timer
 
-    irq_set_exclusive_handler (PIO0_IRQ_0, hsync_handler);
-    irq_set_enabled(PIO0_IRQ_0, true);
-    pio_set_irq0_source_enabled (pio0, pis_interrupt0 , true);
+//    add_repeating_timer_us(1000000/SAMPLING_FREQ,sound_handler,NULL  ,&timer2);
+
+//    scanline=0;
+
+//    irq_set_exclusive_handler (PIO0_IRQ_0, hsync_handler);
+//    irq_set_enabled(PIO0_IRQ_0, true);
+//    pio_set_irq0_source_enabled (pio0, pis_interrupt0 , true);
 
     maincpu_wait=fm7clocks[fm7cpuclock*2];
 
@@ -2728,7 +2737,7 @@ int main() {
 
     // set PSG timer
 
-    add_repeating_timer_us(1000000/SAMPLING_FREQ,sound_handler,NULL  ,&timer2);
+//    add_repeating_timer_us(1000000/SAMPLING_FREQ,sound_handler,NULL  ,&timer2);
 
     tuh_init(BOARD_TUH_RHPORT);
 
@@ -2750,10 +2759,10 @@ int main() {
     irq_set_enabled(UART0_IRQ,true);
     uart_set_irq_enables(uart0,true,false);
 
-//    scanline=0;
-//    irq_set_exclusive_handler (PIO0_IRQ_0, hsync_handler);
-//    irq_set_enabled(PIO0_IRQ_0, true);
-//    pio_set_irq0_source_enabled (pio0, pis_interrupt0 , true);
+    scanline=0;
+    irq_set_exclusive_handler (PIO0_IRQ_0, hsync_handler);
+    irq_set_enabled(PIO0_IRQ_0, true);
+    pio_set_irq0_source_enabled (pio0, pis_interrupt0 , true);
 
     menumode=1;  // Pause emulator
 
