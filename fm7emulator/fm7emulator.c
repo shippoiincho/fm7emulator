@@ -98,6 +98,7 @@ volatile uint16_t fm7keypressed=0;
 //volatile uint16_t fm7lastkeypressed=0;  // for auto repeat
 uint32_t key_repeat_flag=1;
 uint32_t key_repeat_count=0;
+uint32_t key_next_repeat=0;
 uint32_t key_caps=0;
 uint32_t key_kana=0;
 uint32_t lastmodifier=0; 
@@ -470,7 +471,7 @@ bool __not_in_flash_func(sound_handler)(struct repeating_timer *t) {
         if(mainioport[3]&0x80) {   // beep flag
             master_volume+=psg_volume[31];
         } else if ((mainioport[3]&0x40)||(subioport[3])) {  // short beep
-            if((scanline-beep_short_flag)<(262*30)) {
+            if((scanline_total-beep_short_flag)<(262*30)) {
                 master_volume+=psg_volume[31];
             } else {
                 mainioport[3]&=0xbf;
@@ -1757,7 +1758,8 @@ void process_kbd_report(hid_keyboard_report_t const *report) {
                     }
 
                     if(key_repeat_flag) {
-                        key_repeat_count=scanline;
+                        key_repeat_count=scanline_total;
+                        key_next_repeat=key_repeat_count+40*262;
                     }
 
                 }
@@ -2147,7 +2149,7 @@ static mc6809byte__t sub_cpu_read(
             case 3:
 
                 subioport[3]=1;
-                beep_short_flag=scanline;
+                beep_short_flag=scanline_total;
                 return 0xff;
 
             case 4: // Attention FIRQ
@@ -2264,7 +2266,7 @@ static void main_cpu_write(
 
             case 3: // beep
 
-                if(b&0x40) beep_short_flag=scanline;
+                if(b&0x40) beep_short_flag=scanline_total;
                 mainioport[addr-0xfd00]=b;
                 return;
 
@@ -2508,7 +2510,7 @@ static void sub_cpu_write(
 
             case 3:
                 subioport[3]=1;
-                beep_short_flag=scanline;
+                beep_short_flag=scanline_total;
                 return;
 
             case 0x4: // Attention FIRQ
@@ -2843,7 +2845,9 @@ int main() {
             tuh_task();
             video_vsync_sub=0;
             if((key_repeat_flag)&&(key_repeat_count!=0)) {
-                if((scanline-key_repeat_count)==40*262) {
+//                if((scanline_total-key_repeat_count)==40*262) {
+                if(scanline_total>key_next_repeat) {
+                    key_next_repeat+=4*262;
 
                    if(mainioport[0x2]&1) {
                         main_cpu.irq=true;
@@ -2852,8 +2856,8 @@ int main() {
                         sub_cpu.firq=true;
                     }
 
-
-                } else if (((scanline-key_repeat_count)>40*262)&&((scanline-key_repeat_count)%(4*262)==0)) {
+#if 0
+                } else if (((scanline_total-key_repeat_count)>40*262)&&((scanline_total-key_repeat_count)%(4*262)==0)) {
 
                     if(mainioport[0x2]&1) {
                         main_cpu.irq=true;
@@ -2862,7 +2866,7 @@ int main() {
                         sub_cpu.firq=true;
                     }
 
-
+#endif
                 }
             }
         }
